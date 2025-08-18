@@ -163,7 +163,7 @@ class OCRPlugin(Star):
             return ""
     
     async def cleanup_files(self, paths: list):
-        """异步清理临时文件，支持多个文件路径"""
+        """异步清理临时文件"""
         await asyncio.sleep(3)
         for path in paths:
             if path and os.path.exists(path):
