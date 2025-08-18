@@ -13,7 +13,7 @@ import json
 import base64
 import aiohttp
 
-@register("百度OCR文字识别", "Yuki Soffd", "提供OCR文字识别功能，通过/提取文字指令触发", "1.0")
+@register("百度OCR文字识别", "Yuki Soffd", "提供OCR文字识别功能，通过/提取文字指令触发", "1.1")
 class OCRPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -73,8 +73,13 @@ class OCRPlugin(Star):
             return None
 
     
-    async def download_image(self, event: AstrMessageEvent, file_id: str) -> str:
-        """下载图片到临时目录"""
+    async def download_image(self, event: AstrMessageEvent, file_id: str) -> tuple:
+        """
+        下载图片到临时目录
+        返回元组: (插件临时文件路径, astrbot原始图片路径)
+        """
+        original_path = None
+        
         try:
             image_obj = next(
                 (msg for msg in event.get_messages() 
@@ -83,30 +88,37 @@ class OCRPlugin(Star):
             )
         
             if not image_obj:
-                return ""
+                return ("", None)
         
+            # 尝试直接获取文件路径
             file_path = await image_obj.convert_to_file_path()
             if file_path and os.path.exists(file_path):
+                # 记录原始文件路径
+                original_path = file_path
                 with open(file_path, "rb") as f:
                     data = f.read()
             else:
+                # 通过API获取图片
                 client = event.bot
                 result = await client.api.call_action("get_image", file_id=file_id)
                 file_path = result.get("file")
                 if not file_path:
-                    return ""
+                    return ("", None)
+                # 记录原始文件路径
+                original_path = file_path
                 with open(file_path, "rb") as f:
                     data = f.read()
         
+            # 创建插件的临时文件
             temp_path = os.path.join(self.temp_dir, f"ocr_{int(time.time())}.jpg")
             with open(temp_path, "wb") as f:
                 f.write(data)
             
-            return temp_path
+            return (temp_path, original_path)
         
         except Exception as e:
             logger.error(f"图片下载失败: {str(e)}", exc_info=True)
-            return ""
+            return ("", None)
         
     async def _perform_ocr(self, image_path: str) -> str:
         """使用百度OCR API执行文字识别"""
@@ -150,14 +162,16 @@ class OCRPlugin(Star):
             logger.error(f"OCR识别失败: {str(e)}", exc_info=True)
             return ""
     
-    async def cleanup_file(self, path: str):
-        """异步清理临时文件"""
+    async def cleanup_files(self, paths: list):
+        """异步清理临时文件，支持多个文件路径"""
         await asyncio.sleep(3)
-        try:
-            if os.path.exists(path):
-                os.unlink(path)
-        except Exception as e:
-            logger.warning(f"清理临时文件失败 {path}: {str(e)}")
+        for path in paths:
+            if path and os.path.exists(path):
+                try:
+                    os.unlink(path)
+                    logger.info(f"已成功删除文件: {path}")
+                except Exception as e:
+                    logger.warning(f"清理临时文件失败 {path}: {str(e)}")
     
     @filter.command("提取文字")
     async def ocr_command(self, event: AstrMessageEvent):
@@ -172,13 +186,21 @@ class OCRPlugin(Star):
         try:
             # 调用OCR功能，这里需要传递文件ID
             file_id = images[0].file
-            temp_path = await self.download_image(event, file_id)
+            temp_path, original_path = await self.download_image(event, file_id)
             if not temp_path:
                 yield event.plain_result("图片下载失败")
                 return
                 
             text = await self._perform_ocr(temp_path)
-            asyncio.create_task(self.cleanup_file(temp_path))
+            files_to_delete = []
+            if temp_path and os.path.exists(temp_path):
+                files_to_delete.append(temp_path)
+            
+            if original_path and os.path.exists(original_path):
+                files_to_delete.append(original_path)
+            
+            if files_to_delete:
+                asyncio.create_task(self.cleanup_files(files_to_delete))
             
             if not text.strip():
                 yield event.plain_result("未识别到文字，请检查图片清晰度")
